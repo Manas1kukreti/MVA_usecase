@@ -59,6 +59,10 @@ class ConfigurationRepository:
         """Load chart intelligence policy."""
         return self._load_yaml("chart_policy.yaml")
 
+    def get_classification_weights(self) -> dict[str, Any]:
+        """Load column data-category classification weights."""
+        return self._load_yaml("classification_weights.yaml")
+
     def get_supported_primary_domains(self) -> list[str]:
         """Return list of supported primary domains from domain config files."""
         domains_dir = self._config_dir / "domains"

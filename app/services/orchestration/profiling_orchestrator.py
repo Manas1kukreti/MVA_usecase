@@ -98,7 +98,9 @@ class ProfilingOrchestrator:
         self._identifier_detector = IdentifierDetector()
         self._semantic_generator = SemanticCandidateGenerator()
         self._domain_classifier = SecondaryDomainClassifier(config_repo)
-        self._category_classifier = DataCategoryClassifier()
+        self._category_classifier = DataCategoryClassifier(
+            weights=config_repo.get_classification_weights()
+        )
         self._hierarchy_builder = HierarchyCandidateBuilder(config_repo)
         self._rule_loader = RuleLoader(config_repo)
         self._rule_engine = RuleEngine()

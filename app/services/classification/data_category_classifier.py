@@ -83,8 +83,66 @@ _CUSTOMER_EXP_KEYWORDS = re.compile(
 )
 
 
+# Default weights (used when no config is provided)
+_DEFAULT_WEIGHTS = {
+    "name_keyword_match": 0.4,
+    "semantic_type_match": 0.5,
+    "column_role_match": 0.3,
+    "domain_context_boost": 0.2,
+    "domain_context_boost_weak": 0.1,
+    "datetime_parse_match": 0.4,
+}
+
+_DEFAULT_SELECTION = {
+    "secondary_min_ratio_of_primary": 0.5,
+    "secondary_min_absolute": 0.3,
+    "max_secondary_categories": 3,
+    "confidence_gap_threshold": 0.3,
+    "confidence_gap_boost": 0.1,
+}
+
+
 class DataCategoryClassifier:
-    """Classifies columns into data categories using deterministic rules."""
+    """Classifies columns into data categories using configurable weights."""
+
+    def __init__(self, weights: dict[str, Any] | None = None):
+        """
+        Initialize with optional weights from configuration.
+
+        Args:
+            weights: Dict from classification_weights.yaml with keys
+                     'signal_weights' and 'selection'. If None, uses defaults.
+        """
+        if weights:
+            self._signal_weights = weights.get("signal_weights", _DEFAULT_WEIGHTS)
+            self._selection = weights.get("selection", _DEFAULT_SELECTION)
+        else:
+            self._signal_weights = _DEFAULT_WEIGHTS
+            self._selection = _DEFAULT_SELECTION
+
+    @property
+    def _w_name(self) -> float:
+        return self._signal_weights.get("name_keyword_match", 0.4)
+
+    @property
+    def _w_semantic(self) -> float:
+        return self._signal_weights.get("semantic_type_match", 0.5)
+
+    @property
+    def _w_role(self) -> float:
+        return self._signal_weights.get("column_role_match", 0.3)
+
+    @property
+    def _w_domain(self) -> float:
+        return self._signal_weights.get("domain_context_boost", 0.2)
+
+    @property
+    def _w_domain_weak(self) -> float:
+        return self._signal_weights.get("domain_context_boost_weak", 0.1)
+
+    @property
+    def _w_datetime(self) -> float:
+        return self._signal_weights.get("datetime_parse_match", 0.4)
 
     def classify(
         self,
@@ -95,12 +153,7 @@ class DataCategoryClassifier:
         """
         Classify a single column into primary + secondary categories.
 
-        Uses deterministic rules based on:
-        - Column name patterns
-        - Semantic type
-        - Column role
-        - Refined data type
-        - Domain context
+        Uses configurable weights loaded from YAML.
         """
         scores: dict[DataCategory, float] = {}
         evidence: list[dict[str, Any]] = []
@@ -114,7 +167,6 @@ class DataCategoryClassifier:
         self._score_temporal(profile, semantic_candidate, scores, evidence)
 
         if not scores:
-            # Default based on role
             default = self._default_category(semantic_candidate)
             return ColumnCategoryResult(
                 column_name=profile.physical_name,
@@ -129,23 +181,29 @@ class DataCategoryClassifier:
         primary = sorted_categories[0][0]
         primary_score = sorted_categories[0][1]
 
-        # Select secondary (other categories with meaningful scores)
+        # Select secondary using configurable thresholds
+        min_ratio = self._selection.get("secondary_min_ratio_of_primary", 0.5)
+        min_abs = self._selection.get("secondary_min_absolute", 0.3)
+        max_secondary = self._selection.get("max_secondary_categories", 3)
+
         secondary: list[DataCategory] = []
         for cat, score in sorted_categories[1:]:
-            if score >= primary_score * 0.5 and score >= 0.3:
+            if score >= primary_score * min_ratio and score >= min_abs:
                 secondary.append(cat)
 
         # Confidence based on primary score and separation from second
         confidence = min(1.0, primary_score)
+        gap_threshold = self._selection.get("confidence_gap_threshold", 0.3)
+        gap_boost = self._selection.get("confidence_gap_boost", 0.1)
         if len(sorted_categories) > 1:
             gap = primary_score - sorted_categories[1][1]
-            if gap > 0.3:
-                confidence = min(1.0, confidence + 0.1)
+            if gap > gap_threshold:
+                confidence = min(1.0, confidence + gap_boost)
 
         return ColumnCategoryResult(
             column_name=profile.physical_name,
             primary_category=primary,
-            secondary_categories=secondary[:3],  # Max 3 secondary
+            secondary_categories=secondary[:max_secondary],
             confidence=round(confidence, 3),
             evidence=evidence,
         )
@@ -161,14 +219,12 @@ class DataCategoryClassifier:
         for i, profile in enumerate(profiles):
             candidate = semantic_candidates[i] if i < len(semantic_candidates) else None
             if candidate is None:
-                # Create a minimal candidate
-                from app.core.enums import ColumnRole as CR
                 candidate = SemanticCandidate(
                     column_name=profile.physical_name,
                     normalized_key=profile.normalized_key,
                     refined_type=RefinedDataType.UNKNOWN,
                     candidate_semantic_type=None,
-                    candidate_column_role=CR.UNKNOWN,
+                    candidate_column_role=ColumnRole.UNKNOWN,
                     candidate_confidence=0.0,
                     evidence=[],
                 )
@@ -178,7 +234,8 @@ class DataCategoryClassifier:
     def _score_by_name(
         self, name: str, scores: dict[DataCategory, float], evidence: list[dict[str, Any]]
     ) -> None:
-        """Score categories based on column name patterns."""
+        """Score categories based on column name patterns. Weight from config."""
+        w = self._w_name
         checks = [
             (_TRANSACTION_KEYWORDS, DataCategory.TRANSACTION, "transaction_keyword"),
             (_FINANCIAL_KEYWORDS, DataCategory.FINANCIAL, "financial_keyword"),
@@ -194,7 +251,7 @@ class DataCategoryClassifier:
 
         for pattern, category, signal in checks:
             if pattern.search(name):
-                scores[category] = scores.get(category, 0) + 0.4
+                scores[category] = scores.get(category, 0) + w
                 evidence.append({"type": "name_match", "value": signal, "column": name})
 
     def _score_by_semantic_type(
@@ -203,11 +260,12 @@ class DataCategoryClassifier:
         scores: dict[DataCategory, float],
         evidence: list[dict[str, Any]],
     ) -> None:
-        """Score based on semantic type."""
+        """Score based on semantic type. Weight from config."""
         sem_type = (candidate.candidate_semantic_type or "").lower()
         if not sem_type:
             return
 
+        w = self._w_semantic
         mappings: list[tuple[list[str], DataCategory]] = [
             (["monetary_amount", "transaction_amount", "payment"], DataCategory.TRANSACTION),
             (["revenue", "expense", "profit", "margin", "budget", "forecast"], DataCategory.FINANCIAL),
@@ -219,11 +277,8 @@ class DataCategoryClassifier:
 
         for keywords, category in mappings:
             if any(k in sem_type for k in keywords):
-                scores[category] = scores.get(category, 0) + 0.5
-                evidence.append({
-                    "type": "semantic_type",
-                    "value": sem_type,
-                })
+                scores[category] = scores.get(category, 0) + w
+                evidence.append({"type": "semantic_type", "value": sem_type})
                 break
 
     def _score_by_role(
@@ -232,12 +287,13 @@ class DataCategoryClassifier:
         scores: dict[DataCategory, float],
         evidence: list[dict[str, Any]],
     ) -> None:
-        """Score based on column role."""
+        """Score based on column role. Weight from config."""
+        w = self._w_role
         role = candidate.candidate_column_role
         if role == ColumnRole.TEMPORAL_DIMENSION:
-            scores[DataCategory.TIME_SERIES] = scores.get(DataCategory.TIME_SERIES, 0) + 0.3
+            scores[DataCategory.TIME_SERIES] = scores.get(DataCategory.TIME_SERIES, 0) + w
         elif role == ColumnRole.IDENTIFIER:
-            scores[DataCategory.MASTER] = scores.get(DataCategory.MASTER, 0) + 0.3
+            scores[DataCategory.MASTER] = scores.get(DataCategory.MASTER, 0) + w
 
     def _score_by_domain(
         self,
@@ -246,16 +302,19 @@ class DataCategoryClassifier:
         scores: dict[DataCategory, float],
         evidence: list[dict[str, Any]],
     ) -> None:
-        """Boost scores based on primary domain context."""
+        """Boost scores based on primary domain context. Weights from config."""
         domain_lower = primary_domain.lower()
+        w_strong = self._w_domain
+        w_weak = self._w_domain_weak
+
         if domain_lower == "payments":
-            scores[DataCategory.TRANSACTION] = scores.get(DataCategory.TRANSACTION, 0) + 0.2
+            scores[DataCategory.TRANSACTION] = scores.get(DataCategory.TRANSACTION, 0) + w_strong
         elif domain_lower == "finance":
-            scores[DataCategory.FINANCIAL] = scores.get(DataCategory.FINANCIAL, 0) + 0.2
+            scores[DataCategory.FINANCIAL] = scores.get(DataCategory.FINANCIAL, 0) + w_strong
         elif domain_lower == "customer":
-            scores[DataCategory.CUSTOMER_EXPERIENCE] = scores.get(DataCategory.CUSTOMER_EXPERIENCE, 0) + 0.1
+            scores[DataCategory.CUSTOMER_EXPERIENCE] = scores.get(DataCategory.CUSTOMER_EXPERIENCE, 0) + w_weak
         elif domain_lower == "hr":
-            scores[DataCategory.MASTER] = scores.get(DataCategory.MASTER, 0) + 0.1
+            scores[DataCategory.MASTER] = scores.get(DataCategory.MASTER, 0) + w_weak
 
     def _score_temporal(
         self,
@@ -264,9 +323,10 @@ class DataCategoryClassifier:
         scores: dict[DataCategory, float],
         evidence: list[dict[str, Any]],
     ) -> None:
-        """Score for time-series data."""
+        """Score for time-series data. Weight from config."""
         if profile.datetime_parse_ratio >= 0.9:
-            scores[DataCategory.TIME_SERIES] = scores.get(DataCategory.TIME_SERIES, 0) + 0.4
+            w = self._w_datetime
+            scores[DataCategory.TIME_SERIES] = scores.get(DataCategory.TIME_SERIES, 0) + w
             evidence.append({"type": "datetime_ratio", "value": profile.datetime_parse_ratio})
 
     def _default_category(self, candidate: SemanticCandidate) -> DataCategory:
