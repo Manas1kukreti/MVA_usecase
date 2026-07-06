@@ -64,11 +64,13 @@ class TemplateMatcher:
 
             matched: list[tuple[str, str]] = []
             missing: list[str] = []
+            used_columns: set[str] = set()  # Prevent reuse of same column
 
             for concept in levels:
                 col_name = self._find_matching_column(concept, available_columns)
-                if col_name:
+                if col_name and col_name not in used_columns:
                     matched.append((concept, col_name))
+                    used_columns.add(col_name)
                 else:
                     missing.append(concept)
 

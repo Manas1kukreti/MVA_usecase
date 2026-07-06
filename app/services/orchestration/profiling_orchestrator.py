@@ -25,6 +25,8 @@ from app.services.profiling.column_profiler import ColumnProfiler
 from app.services.profiling.type_refiner import TypeRefiner
 from app.services.profiling.identifier_detector import IdentifierDetector
 from app.services.profiling.semantic_candidate_generator import SemanticCandidateGenerator
+from app.services.classification.rules_loader import ClassificationRulesLoader
+from app.services.classification.hybrid_classifier import HybridClassifier
 from app.services.schema_intelligence.interface import SchemaIntelligenceProvider
 from app.services.schema_intelligence.models import ColumnAnalysisInput, DomainContext
 from app.services.domains.secondary_domain_classifier import SecondaryDomainClassifier
@@ -107,6 +109,14 @@ class ProfilingOrchestrator:
         self._readiness_engine = ReadinessEngine()
         self._chart_generator = ChartCandidateGenerator()
         self._agg_engine = AggregationEngine()
+
+        # Hybrid classifier (YAML rules + LLM fallback)
+        from app.services.llm.interface import LLMProvider
+        rules_loader = ClassificationRulesLoader(config_dir="config/rules")
+        self._hybrid_classifier = HybridClassifier(
+            rules_loader=rules_loader,
+            llm_provider=schema_intelligence._llm if hasattr(schema_intelligence, '_llm') else None,
+        )
 
     def execute(
         self,
